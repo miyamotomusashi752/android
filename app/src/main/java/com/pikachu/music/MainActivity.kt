@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
@@ -45,6 +46,7 @@ class MainActivity : AppCompatActivity() {
         val url: String,
         val title: String,
         val artist: String,
+        val referer: String,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,6 +61,11 @@ class MainActivity : AppCompatActivity() {
         webSettings.javaScriptEnabled = true
         webSettings.domStorageEnabled = true
         webSettings.mediaPlaybackRequiresUserGesture = false
+
+        CookieManager.getInstance().setAcceptCookie(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+        }
 
         webView.addJavascriptInterface(NativeBridge(), "Native")
 
@@ -119,7 +126,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "下载已取消", Toast.LENGTH_SHORT).show()
             return
         }
-        startExportDownload(pending.url, pending.title, pending.artist)
+        startExportDownload(pending.url, pending.title, pending.artist, pending.referer)
     }
 
     override fun onDestroy() {
@@ -127,12 +134,13 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private fun startExportDownload(url: String, title: String, artist: String) {
+    private fun startExportDownload(url: String, title: String, artist: String, referer: String) {
         val originUrl = url.trim()
         if (originUrl.isEmpty() || !(originUrl.startsWith("http://") || originUrl.startsWith("https://"))) {
             Toast.makeText(this, "下载链接无效", Toast.LENGTH_SHORT).show()
             return
         }
+        val ref = referer.trim()
 
         val userAgent = try {
             webView.settings.userAgentString
@@ -142,7 +150,7 @@ class MainActivity : AppCompatActivity() {
 
         Toast.makeText(this, "开始准备下载…", Toast.LENGTH_SHORT).show()
         Thread {
-            val entry = audioCache.ensureCached(originUrl, userAgent)
+            val entry = audioCache.ensureCached(originUrl, userAgent, ref)
             if (entry == null || !entry.file.exists() || entry.file.length() <= 0L) {
                 runOnUiThread {
                     Toast.makeText(this, "下载失败（音源可能限制访问）", Toast.LENGTH_SHORT).show()
@@ -239,7 +247,7 @@ class MainActivity : AppCompatActivity() {
 
     private inner class NativeBridge {
         @JavascriptInterface
-        fun download(url: String, title: String, artist: String) {
+        fun download(url: String, title: String, artist: String, referer: String) {
             runOnUiThread {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     val granted =
@@ -248,7 +256,7 @@ class MainActivity : AppCompatActivity() {
                             Manifest.permission.WRITE_EXTERNAL_STORAGE,
                         ) == PackageManager.PERMISSION_GRANTED
                     if (!granted) {
-                        pendingDownload = PendingDownload(url, title, artist)
+                        pendingDownload = PendingDownload(url, title, artist, referer)
                         ActivityCompat.requestPermissions(
                             this@MainActivity,
                             arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
@@ -257,7 +265,7 @@ class MainActivity : AppCompatActivity() {
                         return@runOnUiThread
                     }
                 }
-                startExportDownload(url, title, artist)
+                startExportDownload(url, title, artist, referer)
             }
         }
     }
@@ -282,6 +290,7 @@ private class AudioCache(private val baseDir: File) {
         val path = uri.path.orEmpty()
         if (!path.startsWith("/cache/audio")) return null
         val originUrl = uri.getQueryParameter("url")?.trim().orEmpty()
+        val referer = uri.getQueryParameter("ref")?.trim().orEmpty()
         if (originUrl.isEmpty() || !(originUrl.startsWith("http://") || originUrl.startsWith("https://"))) {
             return errorResponse(400, "Bad Request")
         }
@@ -298,7 +307,8 @@ private class AudioCache(private val baseDir: File) {
             if (!file.exists() || file.length() <= 0L) {
                 val tmp = File(cacheDir, "$key.$ext.tmp")
                 if (tmp.exists()) tmp.delete()
-                val info = downloadToFile(originUrl, tmp, request.requestHeaders)
+                val headers = mergeHeaders(request.requestHeaders, referer)
+                val info = downloadToFile(originUrl, tmp, headers)
                 if (!info.ok) {
                     if (file.exists() && file.length() > 0L) {
                         return fileResponse(file, ext, meta, request.requestHeaders)
@@ -323,10 +333,11 @@ private class AudioCache(private val baseDir: File) {
         return fileResponse(file, ext, meta, request.requestHeaders)
     }
 
-    fun ensureCached(originUrl: String, userAgent: String?): CacheEntry? {
+    fun ensureCached(originUrl: String, userAgent: String?, referer: String?): CacheEntry? {
         val cleanUrl = originUrl.trim()
         if (cleanUrl.isEmpty() || !(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://"))) return null
         if (!cacheDir.exists()) cacheDir.mkdirs()
+        val ref = referer?.trim().orEmpty()
 
         val ext = guessExtension(cleanUrl)
         val key = sha256(cleanUrl)
@@ -338,8 +349,7 @@ private class AudioCache(private val baseDir: File) {
             if (!file.exists() || file.length() <= 0L) {
                 val tmp = File(cacheDir, "$key.$ext.tmp")
                 if (tmp.exists()) tmp.delete()
-                val headers =
-                    if (!userAgent.isNullOrBlank()) mapOf("User-Agent" to userAgent) else emptyMap()
+                val headers = buildHeaders(userAgent, ref)
                 val info = downloadToFile(cleanUrl, tmp, headers)
                 if (!info.ok) return null
                 if (file.exists()) file.delete()
@@ -413,6 +423,17 @@ private class AudioCache(private val baseDir: File) {
 
                 val ua = reqHeaders.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
                 if (!ua.isNullOrBlank()) setRequestProperty("User-Agent", ua)
+                val referer =
+                    reqHeaders.entries.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+                if (!referer.isNullOrBlank()) {
+                    setRequestProperty("Referer", referer)
+                    val origin = originFromReferer(referer)
+                    if (!origin.isNullOrBlank()) setRequestProperty("Origin", origin)
+                }
+                val cookie =
+                    reqHeaders.entries.firstOrNull { it.key.equals("Cookie", ignoreCase = true) }?.value
+                        ?: CookieManager.getInstance().getCookie(url)
+                if (!cookie.isNullOrBlank()) setRequestProperty("Cookie", cookie)
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "close")
             }
@@ -442,6 +463,30 @@ private class AudioCache(private val baseDir: File) {
                 conn?.disconnect()
             } catch (_: Throwable) {
             }
+        }
+    }
+
+    private fun buildHeaders(userAgent: String?, referer: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        if (!userAgent.isNullOrBlank()) out["User-Agent"] = userAgent
+        if (referer.isNotBlank()) out["Referer"] = referer
+        return out
+    }
+
+    private fun mergeHeaders(headers: Map<String, String>, referer: String): Map<String, String> {
+        if (referer.isBlank()) return headers
+        val out = LinkedHashMap<String, String>()
+        headers.forEach { (k, v) -> out[k] = v }
+        out["Referer"] = referer
+        return out
+    }
+
+    private fun originFromReferer(referer: String): String? {
+        return try {
+            val u = URL(referer)
+            u.protocol + "://" + u.host + (if (u.port > 0 && u.port != u.defaultPort) ":" + u.port else "")
+        } catch (_: Throwable) {
+            null
         }
     }
 

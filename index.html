@@ -1351,6 +1351,43 @@
           "search"
           "playlist";
       }
+      .player-top{
+        flex-wrap:wrap;
+        gap:8px;
+        min-height:auto;
+      }
+      .cover-wrapper{
+        width:100px;
+        height:100px;
+        border-radius:16px;
+      }
+      .player-main{
+        flex:1 1 260px;
+      }
+      .track-text{
+        max-width:100%;
+      }
+    }
+    @media (max-width:520px){
+      .cover-wrapper{
+        width:88px;
+        height:88px;
+        border-radius:14px;
+      }
+      .track-title{
+        font-size:16px;
+      }
+      .track-artist{
+        font-size:11px;
+      }
+      .control-main .play-btn{
+        width:36px;
+        height:36px;
+        font-size:16px;
+      }
+      .volume-slider{
+        width:80px;
+      }
     }
   </style>
 </head>
@@ -2713,12 +2750,23 @@
 
     // ===================== 收藏 / 播放 =====================
 
-    function toCacheProxyUrl(url){
+    function guessRefererForTrack(track){
+      if(!track) return '';
+      if(track.pageUrl) return track.pageUrl;
+      if(track.source==='netease') return 'https://music.163.com/';
+      if(track.source==='qq') return 'https://y.qq.com/';
+      if(track.source==='kuwo') return 'https://www.kuwo.cn/';
+      if(track.source==='migu') return 'https://music.migu.cn/';
+      return '';
+    }
+
+    function toCacheProxyUrl(url, referer){
       if(!url) return url;
       const u = url.toString();
       if(u.startsWith('https://appassets.androidplatform.net/cache/')) return u;
       if(!/^https?:\/\//i.test(u)) return u;
-      return 'https://appassets.androidplatform.net/cache/audio?url=' + encodeURIComponent(u);
+      const ref=(referer||'').toString().trim();
+      return 'https://appassets.androidplatform.net/cache/audio?url=' + encodeURIComponent(u) + (ref ? ('&ref=' + encodeURIComponent(ref)) : '');
     }
 
     function isFavorite(track){
@@ -2790,7 +2838,7 @@
         renderLyrics();
         if(!track.audioUrl){showToast(t('toastPlayError'));dom.playerStatus.textContent=t('playerStatusIdle');return;}
         const originalUrl = track.audioUrl;
-        const proxyUrl = toCacheProxyUrl(originalUrl);
+        const proxyUrl = toCacheProxyUrl(originalUrl, guessRefererForTrack(track));
         dom.audio.src = proxyUrl;
         try{
           await dom.audio.play();
@@ -2897,7 +2945,7 @@
       if(!tr||!tr.audioUrl){showToast(t('toastDownloadNotReady'));return;}
       if(window.Native && typeof window.Native.download === 'function'){
         try{
-          window.Native.download(tr.audioUrl||'', tr.title||'', tr.artist||'');
+          window.Native.download(tr.audioUrl||'', tr.title||'', tr.artist||'', guessRefererForTrack(tr));
           return;
         }catch(e){}
       }

@@ -1,7 +1,12 @@
+import com.android.build.api.variant.VariantOutputConfiguration
+import org.gradle.api.provider.Property
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+layout.buildDirectory.set(rootProject.layout.buildDirectory.dir("app"))
 
 android {
     namespace = "com.pikachu.music"
@@ -54,4 +59,18 @@ tasks.register<Copy>("copyWebAssets") {
 
 tasks.named("preBuild") {
     dependsOn("copyWebAssets")
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.forEach { output ->
+            if (output.outputType == VariantOutputConfiguration.OutputType.SINGLE) {
+                val getter =
+                    output.javaClass.methods.firstOrNull { it.name == "getOutputFileName" && it.parameterCount == 0 }
+                val prop = getter?.invoke(output) as? Property<*>
+                @Suppress("UNCHECKED_CAST")
+                (prop as? Property<String>)?.set("PikachuMusic.apk")
+            }
+        }
+    }
 }
