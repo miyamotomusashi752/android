@@ -1793,6 +1793,7 @@
       lyricLines:[],
       currentLyricIndex:-1,
       searchInProgress:false,
+      activeSearchToken:0,
       noMoreResults:false,
       lyricsAlt:false,
       muted:false
@@ -2155,14 +2156,16 @@
 
     // ===================== 各平台搜索 =====================
 
-    async function searchMigu(kw,limit){
+    async function searchMigu(kw,limit,token){
       const url=`https://api.xcvts.cn/api/music/migu?gm=${encodeURIComponent(kw)}&n=&num=${encodeURIComponent(limit)}&type=json`;
       let added=0;
       try{
         const res=await fetch(url);
         const json=await res.json();
         if(json.code!==200||!Array.isArray(json.data))return 0;
+        if(token && token!==state.activeSearchToken) return 0;
         for(const it of json.data){
+          if(token && token!==state.activeSearchToken) break;
           const n=it.n;
           const uid=`migu-${kw}-${n}-${it.title}-${it.singer}`;
           if(state.trackMap.has(uid))continue;
@@ -2183,18 +2186,22 @@
     }
 
     // 网易云搜索（用 vkeys，page + num）
-    async function searchNetease(kw, page, num){
+    async function searchNetease(kw, page, num, token){
       const url=`https://api.vkeys.cn/v2/music/netease?word=${encodeURIComponent(kw)}&page=${encodeURIComponent(page)}&num=${encodeURIComponent(num)}`;
       let added=0;
       try{
         const res=await fetch(url);
         const json=await res.json();
         if(json.code!==200||!Array.isArray(json.data))return 0;
+        if(token && token!==state.activeSearchToken) return 0;
 
-        json.data.forEach((it, idx)=>{
+        const data = json.data;
+        for(let idx=0; idx<data.length; idx++){
+          if(token && token!==state.activeSearchToken) break;
+          const it = data[idx];
           const songId = it.id;
           const uid=`netease-${songId}`;
-          if(state.trackMap.has(uid))return;
+          if(state.trackMap.has(uid))continue;
 
           const track={
             uid,
@@ -2219,14 +2226,14 @@
           state.trackMap.set(uid,track);
           state.searchResults.push(track);
           added++;
-        });
+        }
 
       }catch(e){console.error('netease(vkeys)',e);}
       return added;
     }
 
     // QQ 搜索：使用 tang 的 QQ 音乐搜索 API（只拿列表，不拿 url）
-    async function searchQQ(kw, limit) {
+    async function searchQQ(kw, limit, token) {
     // 新接口：返回直接是数组（或有些情况下可能包一层 data，下面做了兼容）
     const url =
         `https://tang.api.s01s.cn/music_open_api.php` +
@@ -2242,17 +2249,20 @@
         // 兼容：既支持直接数组，也支持 { data: [...] } 这种包装
         const data = Array.isArray(json) ? json : (Array.isArray(json?.data) ? json.data : []);
         if (!Array.isArray(data) || data.length === 0) return 0;
+        if(token && token!==state.activeSearchToken) return 0;
 
         // 按 limit 截断
         const list = data.slice(0, limit || data.length);
 
-        list.forEach((it, idx) => {
+        for(let idx=0; idx<list.length; idx++){
+        if(token && token!==state.activeSearchToken) break;
+        const it = list[idx];
         // 新接口里唯一标识是 song_mid
         const mid = it.song_mid;
-        if (!mid) return;
+        if (!mid) continue;
 
         const uid = `qq-${mid}`;
-        if (state.trackMap.has(uid)) return;
+        if (state.trackMap.has(uid)) continue;
 
         const indexInList = idx + 1; // 1-based：作为 qqIndex / displayIndex
 
@@ -2299,7 +2309,7 @@
         state.trackMap.set(uid, track);
         state.searchResults.push(track);
         added++;
-        });
+        }
     } catch (e) {
         console.error('qq search (tang)', e);
     }
@@ -2308,17 +2318,21 @@
     }
 
     // 酷我搜索
-    async function searchKuwo(kw, limit){
+    async function searchKuwo(kw, limit, token){
       const url=`https://kw-api.cenguigui.cn/?name=${encodeURIComponent(kw)}&page=1&limit=${encodeURIComponent(limit)}`;
       let added=0;
       try{
         const res=await fetch(url);
         const json=await res.json();
         if(json.code!==200 || !Array.isArray(json.data)) return 0;
+        if(token && token!==state.activeSearchToken) return 0;
 
-        json.data.forEach((it, idx)=>{
+        const data = json.data;
+        for(let idx=0; idx<data.length; idx++){
+          if(token && token!==state.activeSearchToken) break;
+          const it = data[idx];
           const uid=`kuwo-${it.rid}`;
-          if(state.trackMap.has(uid))return;
+          if(state.trackMap.has(uid))continue;
 
           const track={
             uid,
@@ -2343,7 +2357,7 @@
           state.trackMap.set(uid,track);
           state.searchResults.push(track);
           added++;
-        });
+        }
       }catch(e){
         console.error('kuwo search',e);
       }
@@ -2352,10 +2366,25 @@
 
     // ===================== 聚合搜索 =====================
 
+    let pendingSearchRender = false;
+    function scheduleSearchRender(){
+      if(pendingSearchRender) return;
+      pendingSearchRender = true;
+      requestAnimationFrame(()=>{
+        pendingSearchRender = false;
+        dom.searchCount.textContent=state.searchResults.length.toString();
+        renderMiniSearchList();
+        renderPlaylistList();
+        updateViewTitle();
+      });
+    }
+
     async function searchAllSources(reset){
       if(!state.searchKeyword){showToast(t('toastNeedKeyword'));return;}
       const enabled=Object.keys(state.enabledSources).filter(k=>state.enabledSources[k]);
       if(!enabled.length){showToast(t('searchStatusNoSource'));return;}
+      const token = (state.activeSearchToken||0) + 1;
+      state.activeSearchToken = token;
       state.searchInProgress=true;
       dom.searchStatus.textContent=t('searchStatusSearching');
       updateViewTitle();
@@ -2368,6 +2397,10 @@
         state.searchResults=[];
         state.trackMap.clear();
         state.noMoreResults=false;
+        dom.searchCount.textContent='0';
+        renderMiniSearchList();
+        renderPlaylistList();
+        updateViewTitle();
       }
 
       const kw=state.searchKeyword;
@@ -2375,26 +2408,22 @@
       for(const s of enabled){
         const limit=state.perSourceCurrentLimit[s]||state.perSourceLimit;
 
-        if(s==='migu')tasks.push(searchMigu(kw,limit));
-        if(s==='netease')tasks.push(searchNetease(kw, state.perSourcePage.netease || 1, state.perSourceLimit));
-        if(s==='qq')tasks.push(searchQQ(kw,limit));
-        if(s==='kuwo')tasks.push(searchKuwo(kw,limit));
+        if(s==='migu')tasks.push(searchMigu(kw,limit,token).then(a=>{scheduleSearchRender();return a||0;}));
+        if(s==='netease')tasks.push(searchNetease(kw, state.perSourcePage.netease || 1, state.perSourceLimit,token).then(a=>{scheduleSearchRender();return a||0;}));
+        if(s==='qq')tasks.push(searchQQ(kw,limit,token).then(a=>{scheduleSearchRender();return a||0;}));
+        if(s==='kuwo')tasks.push(searchKuwo(kw,limit,token).then(a=>{scheduleSearchRender();return a||0;}));
       }
       let added=0;
-      try{
-        const res=await Promise.all(tasks);
-        added=res.reduce((a,b)=>a+(b||0),0);
-      }catch(e){
-        console.error(e);
-        showToast(t('toastSearchError'));
-      }
+      const res=await Promise.allSettled(tasks);
+      if(token!==state.activeSearchToken) return;
+      added=res.reduce((sum, it)=>{
+        if(it.status==='fulfilled') return sum + (it.value||0);
+        return sum;
+      },0);
 
       state.searchInProgress=false;
       dom.searchStatus.textContent=t('searchStatusDone');
-      dom.searchCount.textContent=state.searchResults.length.toString();
-      renderMiniSearchList();
-      renderPlaylistList();
-      updateViewTitle();
+      scheduleSearchRender();
       if(!reset){
         if(added===0){state.noMoreResults=true;showToast(t('toastNoMore'));}
         else state.noMoreResults=false;
