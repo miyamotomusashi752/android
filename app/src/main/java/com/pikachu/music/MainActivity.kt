@@ -1,12 +1,24 @@
 package com.pikachu.music
 
+import android.Manifest
+import android.content.ContentValues
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebViewAssetLoader
@@ -27,6 +39,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private val startUrl = "https://appassets.androidplatform.net/assets/index.html#home"
     private val audioCache by lazy { AudioCache(filesDir) }
+    private var pendingDownload: PendingDownload? = null
+
+    private data class PendingDownload(
+        val url: String,
+        val title: String,
+        val artist: String,
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,6 +59,8 @@ class MainActivity : AppCompatActivity() {
         webSettings.javaScriptEnabled = true
         webSettings.domStorageEnabled = true
         webSettings.mediaPlaybackRequiresUserGesture = false
+
+        webView.addJavascriptInterface(NativeBridge(), "Native")
 
         webView.webChromeClient = WebChromeClient()
         webView.webViewClient = object : WebViewClient() {
@@ -83,15 +104,178 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_WRITE_STORAGE) return
+        val granted =
+            grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        val pending = pendingDownload
+        pendingDownload = null
+        if (!granted || pending == null) {
+            Toast.makeText(this, "下载已取消", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startExportDownload(pending.url, pending.title, pending.artist)
+    }
+
     override fun onDestroy() {
         webView.destroy()
         super.onDestroy()
+    }
+
+    private fun startExportDownload(url: String, title: String, artist: String) {
+        val originUrl = url.trim()
+        if (originUrl.isEmpty() || !(originUrl.startsWith("http://") || originUrl.startsWith("https://"))) {
+            Toast.makeText(this, "下载链接无效", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val userAgent = try {
+            webView.settings.userAgentString
+        } catch (_: Throwable) {
+            null
+        }
+
+        Toast.makeText(this, "开始准备下载…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val entry = audioCache.ensureCached(originUrl, userAgent)
+            if (entry == null || !entry.file.exists() || entry.file.length() <= 0L) {
+                runOnUiThread {
+                    Toast.makeText(this, "下载失败（音源可能限制访问）", Toast.LENGTH_SHORT).show()
+                }
+                return@Thread
+            }
+
+            val baseName = buildFileBaseName(title, artist).ifBlank {
+                URLUtil.guessFileName(originUrl, null, entry.mime ?: guessMimeByExt(entry.ext))
+                    .substringBeforeLast('.')
+            }
+            val displayName = "$baseName.${entry.ext}"
+            val ok = exportToDownloads(entry.file, entry.mime ?: guessMimeByExt(entry.ext), displayName)
+            runOnUiThread {
+                Toast.makeText(this, if (ok) "已保存到下载目录：$displayName" else "保存到下载目录失败", Toast.LENGTH_SHORT).show()
+            }
+        }.start()
+    }
+
+    private fun exportToDownloads(input: File, mime: String, displayName: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/PikachuMusic")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri =
+                    contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: return false
+                val ok = try {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        input.inputStream().use { it.copyTo(out) }
+                    } ?: return false
+                    true
+                } catch (_: Throwable) {
+                    false
+                }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                try {
+                    contentResolver.update(uri, values, null, null)
+                } catch (_: Throwable) {
+                }
+                ok
+            } else {
+                val granted =
+                    ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    ) == PackageManager.PERMISSION_GRANTED
+                if (!granted) return false
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!dir.exists()) dir.mkdirs()
+                val outFile = File(dir, displayName)
+                input.copyTo(outFile, overwrite = true)
+                true
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun buildFileBaseName(title: String, artist: String): String {
+        val t = title.trim()
+        val a = artist.trim()
+        val raw = when {
+            t.isNotEmpty() && a.isNotEmpty() -> "$t - $a"
+            t.isNotEmpty() -> t
+            a.isNotEmpty() -> a
+            else -> ""
+        }
+        return raw
+            .replace(Regex("""[\\/:*?"<>|]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .take(120)
+    }
+
+    private fun guessMimeByExt(ext: String): String {
+        val e = ext.lowercase(Locale.US)
+        val mt = MimeTypeMap.getSingleton().getMimeTypeFromExtension(e)
+        if (!mt.isNullOrBlank()) return mt
+        return when (e) {
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "flac" -> "audio/flac"
+            "wav" -> "audio/wav"
+            "ogg" -> "audio/ogg"
+            else -> "audio/mpeg"
+        }
+    }
+
+    private inner class NativeBridge {
+        @JavascriptInterface
+        fun download(url: String, title: String, artist: String) {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    val granted =
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        pendingDownload = PendingDownload(url, title, artist)
+                        ActivityCompat.requestPermissions(
+                            this@MainActivity,
+                            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                            REQUEST_WRITE_STORAGE,
+                        )
+                        return@runOnUiThread
+                    }
+                }
+                startExportDownload(url, title, artist)
+            }
+        }
+    }
+
+    private companion object {
+        private const val REQUEST_WRITE_STORAGE = 1001
     }
 }
 
 private class AudioCache(private val baseDir: File) {
     private val cacheDir = File(baseDir, "audio_cache")
     private val locks = ConcurrentHashMap<String, Any>()
+    private data class DownloadInfo(val ok: Boolean, val mime: String?)
+    data class CacheEntry(
+        val file: File,
+        val ext: String,
+        val mime: String?,
+    )
 
     fun handle(request: WebResourceRequest): WebResourceResponse? {
         val uri = request.url
@@ -107,16 +291,17 @@ private class AudioCache(private val baseDir: File) {
         val ext = guessExtension(originUrl)
         val key = sha256(originUrl)
         val file = File(cacheDir, "$key.$ext")
+        val meta = File(cacheDir, "$key.meta")
 
         val lock = locks.getOrPut(key) { Any() }
         synchronized(lock) {
             if (!file.exists() || file.length() <= 0L) {
                 val tmp = File(cacheDir, "$key.$ext.tmp")
                 if (tmp.exists()) tmp.delete()
-                val ok = downloadToFile(originUrl, tmp, request.requestHeaders)
-                if (!ok) {
+                val info = downloadToFile(originUrl, tmp, request.requestHeaders)
+                if (!info.ok) {
                     if (file.exists() && file.length() > 0L) {
-                        return fileResponse(file, ext, request.requestHeaders)
+                        return fileResponse(file, ext, meta, request.requestHeaders)
                     }
                     return errorResponse(502, "Download Failed")
                 }
@@ -125,23 +310,68 @@ private class AudioCache(private val baseDir: File) {
                     tmp.delete()
                     return errorResponse(500, "Cache Write Failed")
                 }
+                val mime = sanitizeMime(info.mime)
+                if (!mime.isNullOrBlank()) {
+                    try {
+                        meta.writeText(mime, Charsets.UTF_8)
+                    } catch (_: Throwable) {
+                    }
+                }
             }
         }
 
-        return fileResponse(file, ext, request.requestHeaders)
+        return fileResponse(file, ext, meta, request.requestHeaders)
     }
 
-    private fun fileResponse(file: File, ext: String, headers: Map<String, String>): WebResourceResponse {
-        val mime = guessMime(ext)
+    fun ensureCached(originUrl: String, userAgent: String?): CacheEntry? {
+        val cleanUrl = originUrl.trim()
+        if (cleanUrl.isEmpty() || !(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://"))) return null
+        if (!cacheDir.exists()) cacheDir.mkdirs()
+
+        val ext = guessExtension(cleanUrl)
+        val key = sha256(cleanUrl)
+        val file = File(cacheDir, "$key.$ext")
+        val meta = File(cacheDir, "$key.meta")
+
+        val lock = locks.getOrPut(key) { Any() }
+        synchronized(lock) {
+            if (!file.exists() || file.length() <= 0L) {
+                val tmp = File(cacheDir, "$key.$ext.tmp")
+                if (tmp.exists()) tmp.delete()
+                val headers =
+                    if (!userAgent.isNullOrBlank()) mapOf("User-Agent" to userAgent) else emptyMap()
+                val info = downloadToFile(cleanUrl, tmp, headers)
+                if (!info.ok) return null
+                if (file.exists()) file.delete()
+                if (!tmp.renameTo(file)) {
+                    tmp.delete()
+                    return null
+                }
+                val mime = sanitizeMime(info.mime)
+                if (!mime.isNullOrBlank()) {
+                    try {
+                        meta.writeText(mime, Charsets.UTF_8)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        }
+        val mime = readMime(meta)
+        return CacheEntry(file, ext, mime)
+    }
+
+    private fun fileResponse(file: File, ext: String, meta: File, headers: Map<String, String>): WebResourceResponse {
+        val mime = readMime(meta) ?: guessMime(ext)
         val length = file.length()
         val range = headers.entries.firstOrNull { it.key.equals("Range", ignoreCase = true) }?.value
         if (range.isNullOrBlank()) {
             val stream = BufferedInputStream(FileInputStream(file))
-            val resp = WebResourceResponse(mime, "utf-8", stream)
+            val resp = WebResourceResponse(mime, null, stream)
             resp.setStatusCodeAndReasonPhrase(200, "OK")
             resp.responseHeaders = mapOf(
                 "Accept-Ranges" to "bytes",
                 "Content-Length" to length.toString(),
+                "Content-Type" to mime,
             )
             return resp
         }
@@ -153,12 +383,13 @@ private class AudioCache(private val baseDir: File) {
         skipFully(fis, start)
         val bounded: InputStream = BoundedInputStream(BufferedInputStream(fis), chunkLen)
 
-        val resp = WebResourceResponse(mime, "utf-8", bounded)
+        val resp = WebResourceResponse(mime, null, bounded)
         resp.setStatusCodeAndReasonPhrase(206, "Partial Content")
         resp.responseHeaders = mapOf(
             "Accept-Ranges" to "bytes",
             "Content-Range" to "bytes $start-$end/$length",
             "Content-Length" to chunkLen.toString(),
+            "Content-Type" to mime,
         )
         return resp
     }
@@ -171,7 +402,7 @@ private class AudioCache(private val baseDir: File) {
         return resp
     }
 
-    private fun downloadToFile(url: String, outFile: File, reqHeaders: Map<String, String>): Boolean {
+    private fun downloadToFile(url: String, outFile: File, reqHeaders: Map<String, String>): DownloadInfo {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -187,7 +418,8 @@ private class AudioCache(private val baseDir: File) {
             }
 
             val code = conn.responseCode
-            if (code !in 200..299) return false
+            if (code !in 200..299) return DownloadInfo(false, null)
+            val mime = conn.contentType
 
             conn.inputStream.use { input ->
                 BufferedInputStream(input).use { bis ->
@@ -202,9 +434,9 @@ private class AudioCache(private val baseDir: File) {
                     }
                 }
             }
-            outFile.length() > 0L
+            DownloadInfo(outFile.length() > 0L, mime)
         } catch (_: Throwable) {
-            false
+            DownloadInfo(false, null)
         } finally {
             try {
                 conn?.disconnect()
@@ -235,6 +467,25 @@ private class AudioCache(private val baseDir: File) {
             "ogg" -> "audio/ogg"
             else -> "audio/mpeg"
         }
+    }
+
+    private fun readMime(meta: File): String? {
+        return try {
+            if (!meta.exists()) return null
+            val s = meta.readText(Charsets.UTF_8).trim()
+            sanitizeMime(s)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun sanitizeMime(mime: String?): String? {
+        val raw = mime?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val v = raw.substringBefore(';').trim()
+        if (v.isEmpty()) return null
+        if (!v.contains('/')) return null
+        return v
     }
 
     private fun sha256(input: String): String {

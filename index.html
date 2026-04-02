@@ -1370,18 +1370,11 @@
         <div class="pikachu-box ripple-target">
           <img src="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%20256%20256%27%3E%3Ccircle%20cx%3D%27128%27%20cy%3D%27128%27%20r%3D%27120%27%20fill%3D%27rgb(255%2C213%2C74)%27/%3E%3Ctext%20x%3D%27128%27%20y%3D%27156%27%20text-anchor%3D%27middle%27%20font-family%3D%27system-ui%2C%20sans-serif%27%20font-size%3D%2764%27%20fill%3D%27rgb(35%2C27%2C8)%27%3EPIKA%3C/text%3E%3C/svg%3E" alt="Pikachu" class="pikachu-img">
         </div>
-        <div class="title-text">
-          <h1 data-i18n="appTitle">皮卡丘的音乐站</h1>
-          <p data-i18n="authorLabel">作者：Zhenchao Jin + GPT 5.1</p>
-        </div>
       </div>
       <div class="header-controls">
         <div class="lang-toggle ripple-target">
           <button class="lang-btn active" data-lang="zh">中</button>
           <button class="lang-btn" data-lang="en">EN</button>
-        </div>
-        <div class="shortcut-hint" data-i18n="shortcutHint">
-          快捷键：Space 播放/暂停 · ←/→ 跳转 · ↑/↓ 音量 · N/P 切歌 · F 收藏 · L 切换歌词效果
         </div>
         <button id="library-btn" class="shortcut-toggle-btn ripple-target" title="我的收藏/歌单">📚</button>
         <button id="shortcut-toggle-btn" class="shortcut-toggle-btn ripple-target" title="快捷键说明">⌨️</button>
@@ -2752,8 +2745,19 @@
         state.lyricLines = track.lrc ? parseLRC(track.lrc) : [];
         renderLyrics();
         if(!track.audioUrl){showToast(t('toastPlayError'));dom.playerStatus.textContent=t('playerStatusIdle');return;}
-        dom.audio.src=toCacheProxyUrl(track.audioUrl);
-        await dom.audio.play();
+        const originalUrl = track.audioUrl;
+        const proxyUrl = toCacheProxyUrl(originalUrl);
+        dom.audio.src = proxyUrl;
+        try{
+          await dom.audio.play();
+        }catch(playErr){
+          if(proxyUrl !== originalUrl){
+            dom.audio.src = originalUrl;
+            await dom.audio.play();
+          }else{
+            throw playErr;
+          }
+        }
         state.isPlaying=true;
         dom.playBtn.textContent='⏸';
         dom.playerStatus.textContent=t('playerStatusPlaying');
@@ -2847,7 +2851,13 @@
     function handleDownloadCurrent(){
       const tr=state.currentTrack;
       if(!tr||!tr.audioUrl){showToast(t('toastDownloadNotReady'));return;}
-      window.open(toCacheProxyUrl(tr.audioUrl),'_blank');
+      if(window.Native && typeof window.Native.download === 'function'){
+        try{
+          window.Native.download(tr.audioUrl||'', tr.title||'', tr.artist||'');
+          return;
+        }catch(e){}
+      }
+      window.open(tr.audioUrl,'_blank');
     }
 
     function addCurrentToPlaylist(){
