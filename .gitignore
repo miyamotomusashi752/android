@@ -19,3 +19,11 @@ externalNativeBuild/
 *.jks
 *.keystore
 key.properties
+local.properties
+settings.gradle.kts
+.gradle/8.4/checksums/checksums.lock
+.gradle/8.4/checksums/md5-checksums.bin
+.gradle/8.4/checksums/sha1-checksums.bin
+.gradle/8.4/fileHashes/fileHashes.lock
+.gradle/buildOutputCleanup/buildOutputCleanup.lock
+.gradle/buildOutputCleanup/outputFiles.bin
