@@ -2628,19 +2628,35 @@
     function parseLRC(txt){
       if(!txt)return[];
       const lines=txt.split(/\r?\n/);
-      const reg=/\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]/;
       const out=[];
       for(const line of lines){
-        const m=reg.exec(line); if(!m)continue;
-        const min=parseInt(m[1],10)||0;
-        const sec=parseInt(m[2],10)||0;
-        const ms=m[3]?parseInt(m[3].padEnd(3,'0'),10):0;
-        const time=min*60+sec+ms/1000;
+        const reg=/\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]/g;
+        const times=[];
+        let m;
+        while((m=reg.exec(line))){
+          const min=parseInt(m[1],10)||0;
+          const sec=parseInt(m[2],10)||0;
+          const ms=m[3]?parseInt(m[3].padEnd(3,'0'),10):0;
+          times.push(min*60+sec+ms/1000);
+        }
+        if(!times.length) continue;
         const text=line.replace(reg,'').trim();
-        if(text)out.push({time,text});
+        if(!text) continue;
+        times.forEach(time=>out.push({time,text}));
       }
       out.sort((a,b)=>a.time-b.time);
       return out;
+    }
+
+    function findLyricIndex(time, lines){
+      const t = (time||0) + 0.05;
+      let lo=0, hi=lines.length-1, ans=-1;
+      while(lo<=hi){
+        const mid = (lo+hi)>>1;
+        if(lines[mid].time<=t){ans=mid; lo=mid+1;}
+        else hi=mid-1;
+      }
+      return ans;
     }
 
     function renderLyrics(){
@@ -2675,23 +2691,23 @@
 
     function updateLyricsHighlight(time){
       const lines=state.lyricLines; if(!lines.length)return;
-      let idx=state.currentLyricIndex;
-      if(idx<0||idx>=lines.length||time<lines[idx].time|| (idx+1<lines.length && time>=lines[idx+1].time)){
-        idx=lines.findIndex((l,i)=>{
-          const nxt=lines[i+1];
-          if(!nxt)return time>=l.time-0.05;
-          return time>=l.time-0.05 && time<nxt.time-0.05;
-        });
-      }
-      if(idx<0||idx===state.currentLyricIndex)return;
+      const idx=findLyricIndex(time,lines);
+      if(idx===state.currentLyricIndex)return;
       state.currentLyricIndex=idx;
       const wrap=dom.lyricsInner;
       wrap.querySelectorAll('.lyrics-line.active').forEach(el=>el.classList.remove('active'));
+      if(idx<0){
+        dom.lyricsContainer.scrollTo({top:0,behavior:'auto'});
+        return;
+      }
       const act=wrap.querySelector(`.lyrics-line[data-index="${idx}"]`);
       if(act){
         act.classList.add('active');
         const box=dom.lyricsContainer;
-        box.scrollTo({top:act.offsetTop-box.clientHeight*0.45,behavior:'auto'});
+        const actRect=act.getBoundingClientRect();
+        const boxRect=box.getBoundingClientRect();
+        const top=box.scrollTop + (actRect.top - boxRect.top) - box.clientHeight*0.45;
+        box.scrollTo({top,behavior:'auto'});
       }
     }
 
@@ -3361,6 +3377,12 @@
         const intensity = Math.abs(Math.sin(cur * 2.3));
         audioLevel = 0.3 + 0.7 * intensity * (dom.audio.volume || 1);
         updateLyricsHighlight(cur);
+      });
+      dom.audio.addEventListener('loadedmetadata',()=>{
+        updateLyricsHighlight(dom.audio.currentTime||0);
+      });
+      dom.audio.addEventListener('seeked',()=>{
+        updateLyricsHighlight(dom.audio.currentTime||0);
       });
       dom.audio.addEventListener('play',()=>{
         state.isPlaying=true;
